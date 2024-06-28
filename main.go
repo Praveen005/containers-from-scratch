@@ -2,40 +2,18 @@ package main
 
 import (
 	"fmt"
+	"io/ioutil"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strconv"
 	"syscall"
 )
 
 // docker 			run image <cmd> <params>
 // go run main.go	run 	  <cmd> <params>
 
-// we still don't have namespace process id.
-// if you run: sudo go run main.go run /bin/bash and then run `ps`, it will show you large numbered PIDs
-/*
-PID TTY          TIME CMD
-88447 pts/14   00:00:00 sudo
-88448 pts/14   00:00:00 go
-88567 pts/14   00:00:00 main
-88573 pts/14   00:00:00 exe
-88579 pts/14   00:00:00 bash
-88635 pts/14   00:00:00 ps
-*/
-// we want the PIDs for the process inside the container to start from 1
-// we can do it by using syscall.CLONE_NEWPID while creating the namespace
-// Try running the command above again, and see
-/*
-  PID TTY          TIME CMD
-98911 pts/14   00:00:00 sudo
-98912 pts/14   00:00:00 go
-99017 pts/14   00:00:00 main
-99022 pts/14   00:00:00 exe
-99027 pts/14   00:00:00 bash
-99079 pts/14   00:00:00 ps
-*/
 
-// It still doesn't work, beacuse `ps` don't get the PIDs magically, but gets from the /proc directory, check by ls /proc
-// so, inside my container it needs its own /proc directory, currently it is seeing the same /proc directory
 func main() {
 	switch os.Args[1] {
 	case "run":
@@ -56,7 +34,9 @@ func run(){
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Cloneflags: syscall.CLONE_NEWUTS | syscall.CLONE_NEWPID,
+		Cloneflags: syscall.CLONE_NEWUTS | syscall.CLONE_NEWPID | syscall.CLONE_NEWNS,
+	
+		Unshareflags: syscall.CLONE_NEWNS,
 	}
 	cmd.Run()
 }
@@ -64,36 +44,54 @@ func run(){
 func child(){
 	fmt.Printf("Running %v as %d\n", os.Args[2:], os.Getpid())
 
+	cg()
+
 	syscall.Sethostname([]byte("container"))
-	// A container should have its own root file system.
-	// This is a fundamental principle of containerization, which ensures that containers are isolated from each other and the host system.
-	// container uses as its root directory. It contains all the files and directories necessary for the container's processes to run.
-	// Lizz used Vagarant-fs, we will use ubuntu file system.
-	// way to do:
-	// start the ubuntu container, extract its file system in a tar file, store it, make a root directory for your container, extract the fs here, and use it as the container's file system
-	/*
-
-	docker run -d --rm --name ubuntufs ubuntu:20.04 sleep 1000
-	docker export ubuntufs -o ubuntufs.tar
-	docker stop ubuntufs
-	sudo mkdir -p /container-root
-	sudo tar xf ubuntufs.tar -C /container-root/
-
-
-	*/
+	
 	syscall.Chroot("/container-root")
 	syscall.Chdir("/")
+
+	syscall.Mount("proc", "proc", "proc", 0, "")
 
 	cmd := exec.Command(os.Args[2], os.Args[3:]...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.Run()
+
+	syscall.Unmount("/proc", 0)
 }
 
-// Start the container:  sudo go run main.go run /bin/bash
-// In the container, start a process:  sleep 100   
-// Go to another terminal outside the container i.e. from host: ps -C sleep
-// get the PID(put in place of 55327), and run `sudo ls -l /proc/55327/root`
-// you will get something like: lrwxrwxrwx 1 root root 0 Jun 28 18:48 /proc/55327/root -> /container-root
-// you can see /container-root is the root directory of the running container
+func cg() {
+	cgroups := "/sys/fs/cgroup/"  // control group is going to this dir
+	pids := filepath.Join(cgroups, "pids") // inside that to pids
+	os.Mkdir(filepath.Join(pids, "praveen"), 0755) // inside that a cgroup I am creating called "praveen"
+	must(ioutil.WriteFile(filepath.Join(pids, "praveen/pids.max"), []byte("20"), 0700)) // and we will write a limit of 20 on the number of processes, meaning there can be only 20 processes in my control group
+	// Removes the new cgroup in place after the container exits
+	must(ioutil.WriteFile(filepath.Join(pids, "praveen/notify_on_release"), []byte("1"), 0700))
+	must(ioutil.WriteFile(filepath.Join(pids, "praveen/cgroup.procs"), []byte(strconv.Itoa(os.Getpid())), 0700)) // basically getting current PIDs by os.Getpid() and writing inside my cgroup called `cgroup.procs`. Basically saying, this process is now the ember of this control group
+}
+
+func must(err error) {
+	if err != nil {
+		panic(err)
+	}
+}
+
+// If you go to `cd /sys/fs/cgroup` and `ls`, you will see directory of each of the type of control group that you can setup
+// lets see memory: `cd memory` then `ls`: you will large number of parameters that you can set for memory
+// In here you can also see docker folder, let's see inside: `cd docker` then `ls`, you can see lots of parameters.
+// let's run a container: docker run --rm -it ubuntu /bin/bash
+// Got a container id starting with c33718d4e517
+// let's head back to another terminal and again do `ls` again inside docker directory, you will see a directory inside the control group structure starting with c33718d4e517, means docker has created a control group for this container.
+// if you look for something inside that directory, by `cat c33718d4e517fb3bec3a00692e7faa92fd725fc6d85f124d70d0f61660a0c68e/memory.limit_in_bytes`
+// got: 9223372036854771712  // probably using the max available. let's constraint it and see
+// docker run --rm -it --memory=10M ubuntu /bin/bash
+// `cat af54156ec22117c0ca6a699f1c5a579ae821b5e6961e5d26cf2d5aeecca51297/memory.limit_in_bytes` gave: 10485760
+// what happened is docker wrote that number in that file and that how it tel the kernel to limit that particular container to 10MB memory
+
+// Now comeback to /sys/fs/cgroup by `cd ../..`
+// cd pids then cat docker/pids.max : it gives `max` means it will allow max number of processes to run inside the container
+// Let's create a control group that limits the number of process that can run: see cg()
+
+// Fault Bomb: :() { : | : &}; :, continously creates processes, don't run o host machine

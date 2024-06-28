@@ -24,17 +24,6 @@ Following are different types of namespaces:
     - InterProcess Comms
 
 
-## CGroups
-
-- What you can use 
-- Filesystem interface 
-    - Memory 
-    - CPU 
-    - I/O 
-    - Process numbers
-
-
-
 ## Working of container:
 
 1. Encapsulation into a container:
@@ -68,3 +57,20 @@ These namespaces aren't completely separate; they interact with each other withi
     - It then launches the container's init process (e.g., your application) within these namespaces
 
     - This init process becomes PID 1 in the container's `PID namespace`
+
+
+
+    ## CGroups
+
+- What you can use 
+- Configured using pseudo filesystem interface(so, it is another set of what look like directories and files, but we can manipulate them to set properties that we want kernel to understand, and the Kernel will write information into the filesystem, so we can read it back again)
+
+    - Memory 
+    - CPU 
+    - I/O
+    - Process numbers
+
+
+> If `Namespaces` restrict what we can see drom inside a container, `CGroups` limits the resources that we can use.
+
+CGroups basically talks about how much memory, CPU, I/O bandwidth we can use also how many processes are allowed to in a container.
