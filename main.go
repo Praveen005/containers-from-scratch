@@ -9,6 +9,11 @@ import (
 
 // docker 			run image <cmd> <params>
 // go run main.go	run 	  <cmd> <params>
+
+// we still don't have namespace process id.
+// if you run: sudo go run main.go run /bin/bash and then run `ps`, it will show you large numbered PIDs
+// we want the PIDs for the process inside the container to start from 1
+// we can do it by using syscall.CLONE_NEWPID while creating the namespace
 func main() {
 	switch os.Args[1] {
 	case "run":
@@ -22,27 +27,20 @@ func main() {
 }
 
 func run(){
-	fmt.Printf("Running %v\n", os.Args[2:])
+	fmt.Printf("Running %v as %d\n", os.Args[2:], os.Getpid())
 
-	// /proc/self/exe will ensure it run itself again
 	cmd := exec.Command("/proc/self/exe", append([]string{"child"}, os.Args[2:]...)...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	// creating some namespaces, using system process attributes
-	// syscall.SysProcAttr is a struct that allows you to specify operating system-specific attributes for new processes. It is used in conjunction with the os/exec package to customize how processes are created and managed.
 	cmd.SysProcAttr = &syscall.SysProcAttr{
-		// cloning is what creates a new process, we can arbitrary command in.
-		// we gonna start with flag for unix time sharing system.
-		// All there in UTS namespace is hostname. 
-		// But this is gonna let us have our own hostname inside the container, so can see its own and can't see what's happening on the host
-		Cloneflags: syscall.CLONE_NEWUTS,
+		Cloneflags: syscall.CLONE_NEWUTS | syscall.CLONE_NEWPID,
 	}
 	cmd.Run()
 }
 
 func child(){
-	fmt.Printf("Running child %v\n", os.Args[2:])
+	fmt.Printf("Running %v as %d\n", os.Args[2:], os.Getpid())
 	syscall.Sethostname([]byte("container"))
 
 	cmd := exec.Command(os.Args[2], os.Args[3:]...)
@@ -51,5 +49,3 @@ func child(){
 	cmd.Stderr = os.Stderr
 	cmd.Run()
 }
-
-// To run: sudo go run main.go run /bin/bash
